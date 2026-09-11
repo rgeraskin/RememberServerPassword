@@ -1,0 +1,29 @@
+[config]
+schemaVersion = "0.0.1"
+
+[package]
+namespace = "MagiCorp"
+name = "RememberServerPassword"
+versionNumber = "1.1.0"
+description = "Client-side remembered Valheim server passwords with automatic login and a Quick Connect button for your last server."
+websiteUrl = "https://github.com/iMagic16/RememberServerPassword"
+containsNsfwContent = false
+
+[package.dependencies]
+denikson-BepInExPack_Valheim = "5.4.2350"
+
+[build]
+icon = "./icon.png"
+readme = "../README.md"
+outdir = "./dist"
+
+[[build.copy]]
+source = "../releases/MagiCorp.RememberServerPassword-1.1.0.dll"
+target = "BepInEx/plugins/RememberServerPassword/MagiCorp.RememberServerPassword.dll"
+
+[publish]
+repository = "https://thunderstore.io"
+communities = ["valheim"]
+
+[publish.categories]
+valheim = ["mods"]
