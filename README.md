@@ -96,3 +96,14 @@ Relevant vanilla paths used rather than replaced:
 - `FejdStartup.ProceedJoinRequest`
 
 The plugin intentionally delegates authentication, connection setup, character selection and multiplayer privilege validation back to Valheim.
+
+## Changelog
+
+### 1.1.1
+
+- New Thunderstore icon.
+
+### 1.1.0
+
+- Added Quick Connect for the last successfully joined server.
+- Added remembered passwords keyed per server identity.

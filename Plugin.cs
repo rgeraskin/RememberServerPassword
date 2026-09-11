@@ -17,7 +17,7 @@ namespace MagiCorp.RememberServerPassword
     {
         public const string Guid = "magicorp.valheim.rememberserverpassword";
         public const string Name = "Remember Server Password";
-        public const string Version = "1.1.0";
+        public const string Version = "1.1.1";
         private const string QuickConnectObjectName = "MagiCorp_RememberServerPassword_QuickConnect";
 
         internal static Plugin Instance;
