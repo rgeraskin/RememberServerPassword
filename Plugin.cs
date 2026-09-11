@@ -6,6 +6,9 @@ using System.Text;
 using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
+using TMPro;
+using UnityEngine;
+using UnityEngine.UI;
 
 namespace MagiCorp.RememberServerPassword
 {
@@ -14,13 +17,17 @@ namespace MagiCorp.RememberServerPassword
     {
         public const string Guid = "magicorp.valheim.rememberserverpassword";
         public const string Name = "Remember Server Password";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
+        private const string QuickConnectObjectName = "MagiCorp_RememberServerPassword_QuickConnect";
 
         internal static Plugin Instance;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<bool> AutoSubmit;
         internal static ConfigEntry<bool> RememberPasswords;
+        internal static ConfigEntry<bool> ShowQuickConnectButton;
+        internal static ConfigEntry<string> LastServer;
         internal static ConfigEntry<bool> ForgetAllPasswords;
+        internal static ConfigEntry<bool> ForgetLastServer;
         internal static ConfigEntry<bool> VerboseLogging;
 
         private static readonly Dictionary<string, string> Passwords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -37,20 +44,36 @@ namespace MagiCorp.RememberServerPassword
             Enabled = Config.Bind("General", "Enabled", true, "Enable remembered server passwords.");
             AutoSubmit = Config.Bind("General", "AutoSubmit", true, "Automatically submit a remembered password when a known server requests one.");
             RememberPasswords = Config.Bind("General", "RememberPasswords", true, "Remember manually entered passwords after a successful connection.");
-            ForgetAllPasswords = Config.Bind("General", "ForgetAllPasswords", false, "Set true and restart the game to erase all remembered passwords. It resets to false automatically.");
+            ShowQuickConnectButton = Config.Bind("Quick Connect", "ShowQuickConnectButton", true, "Add a Quick Connect button to the Valheim main menu for the last successfully joined server.");
+            LastServer = Config.Bind("Quick Connect", "LastServer", "", "Last successfully joined server identity. Managed automatically, but may be cleared manually.");
+            ForgetAllPasswords = Config.Bind("Maintenance", "ForgetAllPasswords", false, "Set true and restart the game to erase all remembered passwords. It resets to false automatically.");
+            ForgetLastServer = Config.Bind("Maintenance", "ForgetLastServer", false, "Set true and restart the game to clear the Quick Connect destination. It resets to false automatically.");
             VerboseLogging = Config.Bind("General", "VerboseLogging", false, "Log server identity matching details. Passwords are never logged.");
 
             StorePath = Path.Combine(Paths.ConfigPath, "MagiCorp.RememberServerPassword.dat");
             KeyPath = Path.Combine(Paths.ConfigPath, "MagiCorp.RememberServerPassword.key");
 
+            bool configChanged = false;
             if (ForgetAllPasswords.Value)
             {
+                Passwords.Clear();
                 TryDelete(StorePath);
                 TryDelete(KeyPath);
                 ForgetAllPasswords.Value = false;
-                Config.Save();
+                configChanged = true;
                 Logger.LogInfo("All remembered server passwords were erased.");
             }
+
+            if (ForgetLastServer.Value)
+            {
+                LastServer.Value = "";
+                ForgetLastServer.Value = false;
+                configChanged = true;
+                Logger.LogInfo("Quick Connect last server was cleared.");
+            }
+
+            if (configChanged)
+                Config.Save();
 
             LoadStore();
             new Harmony(Guid).PatchAll();
@@ -61,13 +84,16 @@ namespace MagiCorp.RememberServerPassword
         {
             try
             {
-                string host = AccessTools.Field(typeof(ZNet), "m_serverHost").GetValue(null) as string;
-                int port = (int)AccessTools.Field(typeof(ZNet), "m_serverHostPort").GetValue(null);
-                ulong steamId = (ulong)AccessTools.Field(typeof(ZNet), "m_serverSteamID").GetValue(null);
-                string playFabId = AccessTools.Field(typeof(ZNet), "m_serverPlayFabPlayerId").GetValue(null) as string;
+                string host = AccessTools.Field(typeof(ZNet), "m_serverHost")?.GetValue(null) as string;
+                object portObject = AccessTools.Field(typeof(ZNet), "m_serverHostPort")?.GetValue(null);
+                object steamObject = AccessTools.Field(typeof(ZNet), "m_serverSteamID")?.GetValue(null);
+                string playFabId = AccessTools.Field(typeof(ZNet), "m_serverPlayFabPlayerId")?.GetValue(null) as string;
+
+                int port = portObject is int p ? p : 0;
+                ulong steamId = steamObject is ulong s ? s : 0UL;
 
                 if (!string.IsNullOrWhiteSpace(host) && port > 0)
-                    return "host/" + host.Trim().ToLowerInvariant() + ":" + port;
+                    return FormatHostKey(host, port);
 
                 if (steamId != 0UL)
                     return "steam/" + steamId;
@@ -81,6 +107,14 @@ namespace MagiCorp.RememberServerPassword
             }
 
             return null;
+        }
+
+        private static string FormatHostKey(string host, int port)
+        {
+            host = host.Trim().ToLowerInvariant();
+            if (host.IndexOf(':') >= 0 && !(host.StartsWith("[") && host.EndsWith("]")))
+                host = "[" + host + "]";
+            return "host/" + host + ":" + port;
         }
 
         internal static bool TryGetPassword(string serverKey, out string password)
@@ -106,6 +140,20 @@ namespace MagiCorp.RememberServerPassword
             AutoAttemptServerKey = serverKey;
             if (VerboseLogging.Value)
                 LogInfo("Auto-submitting remembered password for " + serverKey);
+        }
+
+        internal static void RecordSuccessfulConnection()
+        {
+            string serverKey = GetCurrentServerKey();
+            if (!string.IsNullOrEmpty(serverKey) && LastServer.Value != serverKey)
+            {
+                LastServer.Value = serverKey;
+                Instance.Config.Save();
+                if (VerboseLogging.Value)
+                    LogInfo("Quick Connect destination updated to " + serverKey);
+            }
+
+            CommitPendingPassword();
         }
 
         internal static void CommitPendingPassword()
@@ -151,6 +199,178 @@ namespace MagiCorp.RememberServerPassword
             PendingServerKey = null;
             PendingPassword = null;
             AutoAttemptServerKey = null;
+        }
+
+        internal static void EnsureQuickConnectButton(FejdStartup startup)
+        {
+            if (!ShowQuickConnectButton.Value || startup == null)
+                return;
+
+            try
+            {
+                GameObject menuList = AccessTools.Field(typeof(FejdStartup), "m_menuList")?.GetValue(startup) as GameObject;
+                if (menuList == null)
+                    return;
+
+                Button quickButton = null;
+                Button[] allButtons = menuList.GetComponentsInChildren<Button>(true);
+                Button template = null;
+                foreach (Button candidate in allButtons)
+                {
+                    if (candidate == null) continue;
+                    if (candidate.gameObject.name == QuickConnectObjectName)
+                        quickButton = candidate;
+                    else if (template == null && candidate.gameObject.activeSelf)
+                        template = candidate;
+                }
+
+                if (quickButton == null)
+                {
+                    if (template == null)
+                    {
+                        LogWarning("Could not add Quick Connect button because the main menu button template was not found.");
+                        return;
+                    }
+
+                    GameObject clone = UnityEngine.Object.Instantiate(template.gameObject, template.transform.parent);
+                    clone.name = QuickConnectObjectName;
+                    quickButton = clone.GetComponent<Button>();
+                    if (quickButton == null)
+                    {
+                        UnityEngine.Object.Destroy(clone);
+                        return;
+                    }
+
+                    quickButton.onClick.RemoveAllListeners();
+                    quickButton.onClick.AddListener(() => QuickConnect(startup));
+                    PlaceQuickConnectButton(quickButton, template);
+                }
+
+                bool available = TryBuildJoinData(LastServer.Value, out _);
+                quickButton.interactable = available;
+                TMP_Text text = quickButton.GetComponentInChildren<TMP_Text>(true);
+                if (text != null)
+                    text.text = available ? "Quick Connect: " + DisplayServer(LastServer.Value) : "Quick Connect: No recent server";
+            }
+            catch (Exception ex)
+            {
+                LogWarning("Could not create Quick Connect button: " + ex.Message);
+            }
+        }
+
+        private static void PlaceQuickConnectButton(Button button, Button template)
+        {
+            RectTransform rect = button.transform as RectTransform;
+            RectTransform parent = button.transform.parent as RectTransform;
+            if (rect == null || parent == null)
+                return;
+
+            LayoutGroup layout = parent.GetComponent<LayoutGroup>();
+            if (layout != null)
+            {
+                button.transform.SetSiblingIndex(Math.Min(template.transform.GetSiblingIndex() + 1, parent.childCount - 1));
+                LayoutRebuilder.ForceRebuildLayoutImmediate(parent);
+                return;
+            }
+
+            float lowestY = template.transform is RectTransform templateRect ? templateRect.anchoredPosition.y : rect.anchoredPosition.y;
+            float height = Math.Max(rect.rect.height, 35f);
+            foreach (Button siblingButton in parent.GetComponentsInChildren<Button>(true))
+            {
+                if (siblingButton == button || siblingButton.transform.parent != parent)
+                    continue;
+                if (siblingButton.transform is RectTransform siblingRect)
+                    lowestY = Math.Min(lowestY, siblingRect.anchoredPosition.y);
+            }
+
+            rect.anchoredPosition = new Vector2(rect.anchoredPosition.x, lowestY - height - 8f);
+        }
+
+        private static void QuickConnect(FejdStartup startup)
+        {
+            if (!TryBuildJoinData(LastServer.Value, out ServerJoinData joinData))
+            {
+                LogWarning("Quick Connect has no valid last server.");
+                return;
+            }
+
+            try
+            {
+                FejdStartup.ServerPassword = string.Empty;
+                AccessTools.Method(typeof(FejdStartup), "ProceedJoinRequest")?.Invoke(startup, new object[] { joinData });
+                LogInfo("Quick Connect requested for " + DisplayServer(LastServer.Value));
+            }
+            catch (Exception ex)
+            {
+                LogError("Quick Connect failed: " + ex.GetBaseException().Message);
+            }
+        }
+
+        private static bool TryBuildJoinData(string serverKey, out ServerJoinData joinData)
+        {
+            joinData = ServerJoinData.None;
+            if (string.IsNullOrWhiteSpace(serverKey))
+                return false;
+
+            try
+            {
+                if (serverKey.StartsWith("steam/", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!ulong.TryParse(serverKey.Substring(6), out ulong steamId) || steamId == 0UL)
+                        return false;
+                    joinData = new ServerJoinData(new ServerJoinDataSteamUser(steamId));
+                    return joinData.IsValid;
+                }
+
+                if (serverKey.StartsWith("playfab/", StringComparison.OrdinalIgnoreCase))
+                {
+                    string playerId = serverKey.Substring(8);
+                    if (string.IsNullOrWhiteSpace(playerId))
+                        return false;
+                    joinData = new ServerJoinData(new ServerJoinDataPlayFabUser(playerId));
+                    return joinData.IsValid;
+                }
+
+                if (serverKey.StartsWith("host/", StringComparison.OrdinalIgnoreCase))
+                {
+                    string endpoint = serverKey.Substring(5);
+                    string host;
+                    string portText;
+                    if (endpoint.StartsWith("[", StringComparison.Ordinal))
+                    {
+                        int close = endpoint.LastIndexOf("]:", StringComparison.Ordinal);
+                        if (close <= 1) return false;
+                        host = endpoint.Substring(1, close - 1);
+                        portText = endpoint.Substring(close + 2);
+                    }
+                    else
+                    {
+                        int colon = endpoint.LastIndexOf(':');
+                        if (colon <= 0) return false;
+                        host = endpoint.Substring(0, colon);
+                        portText = endpoint.Substring(colon + 1);
+                    }
+
+                    if (!ushort.TryParse(portText, out ushort port) || port == 0 || string.IsNullOrWhiteSpace(host))
+                        return false;
+                    joinData = new ServerJoinData(new ServerJoinDataDedicated(host, port));
+                    return joinData.IsValid;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogWarning("Could not parse last server identity: " + ex.Message);
+            }
+
+            return false;
+        }
+
+        private static string DisplayServer(string serverKey)
+        {
+            if (string.IsNullOrWhiteSpace(serverKey)) return "No recent server";
+            int slash = serverKey.IndexOf('/');
+            string value = slash >= 0 && slash + 1 < serverKey.Length ? serverKey.Substring(slash + 1) : serverKey;
+            return value.Length <= 42 ? value : value.Substring(0, 39) + "...";
         }
 
         private static void LoadStore()
@@ -311,6 +531,15 @@ namespace MagiCorp.RememberServerPassword
         private static void LogError(string message) { if (Instance != null) Instance.Logger.LogError(message); }
     }
 
+    [HarmonyPatch(typeof(FejdStartup), "SetupGui")]
+    internal static class MainMenuPatch
+    {
+        private static void Postfix(FejdStartup __instance)
+        {
+            Plugin.EnsureQuickConnectButton(__instance);
+        }
+    }
+
     [HarmonyPatch(typeof(ZNet), "RPC_ClientHandshake")]
     internal static class ClientHandshakePatch
     {
@@ -340,7 +569,7 @@ namespace MagiCorp.RememberServerPassword
         private static void Postfix(ZNet __instance)
         {
             if (!__instance.IsServer())
-                Plugin.CommitPendingPassword();
+                Plugin.RecordSuccessfulConnection();
         }
     }
 
