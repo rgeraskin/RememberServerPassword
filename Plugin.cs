@@ -251,6 +251,8 @@ namespace MagiCorp.RememberServerPassword
                 TMP_Text text = quickButton.GetComponentInChildren<TMP_Text>(true);
                 if (text != null)
                     text.text = available ? "Quick Connect: " + DisplayServer(LastServer.Value) : "Quick Connect: No recent server";
+                if (available)
+                    LinkQuickConnectNavigation(startup, quickButton);
             }
             catch (Exception ex)
             {
@@ -284,6 +286,58 @@ namespace MagiCorp.RememberServerPassword
             }
 
             rect.anchoredPosition = new Vector2(rect.anchoredPosition.x, lowestY - height - 8f);
+        }
+
+        // The main menu buttons form an explicit up/down navigation chain, and FejdStartup caches
+        // m_menuButtons in Awake for arrow-key navigation. A cloned button is in neither, so the
+        // gamepad and arrow keys skip it. Splice it in after the button visually above it.
+        private static void LinkQuickConnectNavigation(FejdStartup startup, Button button)
+        {
+            var buttonsField = AccessTools.Field(typeof(FejdStartup), "m_menuButtons");
+            Button[] menuButtons = buttonsField?.GetValue(startup) as Button[];
+            if (menuButtons == null || Array.IndexOf(menuButtons, button) >= 0)
+                return;
+
+            float buttonY = button.transform.position.y;
+            int aboveIndex = -1;
+            for (int i = 0; i < menuButtons.Length; i++)
+            {
+                if (menuButtons[i] == null)
+                    continue;
+                float y = menuButtons[i].transform.position.y;
+                if (y > buttonY && (aboveIndex < 0 || y < menuButtons[aboveIndex].transform.position.y))
+                    aboveIndex = i;
+            }
+            Button above = aboveIndex >= 0 ? menuButtons[aboveIndex] : null;
+
+            var ordered = new List<Button>(menuButtons);
+            ordered.Insert(aboveIndex + 1, button);
+            buttonsField.SetValue(startup, ordered.ToArray());
+
+            Navigation navigation = button.navigation;
+            if (navigation.mode != Navigation.Mode.Explicit)
+                return;
+
+            // Take over whatever the button above pointed down to, so a wrap-around chain stays intact.
+            Selectable next = above != null
+                ? above.navigation.selectOnDown
+                : (aboveIndex + 2 < ordered.Count ? ordered[aboveIndex + 2] : null);
+            navigation.selectOnUp = above;
+            navigation.selectOnDown = next;
+            button.navigation = navigation;
+
+            if (above != null)
+            {
+                Navigation aboveNavigation = above.navigation;
+                aboveNavigation.selectOnDown = button;
+                above.navigation = aboveNavigation;
+            }
+            if (next != null && next.navigation.selectOnUp == above)
+            {
+                Navigation nextNavigation = next.navigation;
+                nextNavigation.selectOnUp = button;
+                next.navigation = nextNavigation;
+            }
         }
 
         private static void QuickConnect(FejdStartup startup)
